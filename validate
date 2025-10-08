@@ -1,0 +1,277 @@
+import React, { useState } from "react";
+import { MedicalImage, ValidationAttempt } from "@/entities/all";
+import { SendEmail } from "@/integrations/Core";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import { CheckCircle2, XCircle, AlertCircle, Loader2, Shield, Key } from "lucide-react";
+import { Textarea } from "@/components/ui/textarea";
+
+import FileDropZone from "../components/upload/FileDropZone";
+import ValidationResult from "../components/validate/ValidationResult";
+
+export default function ValidatePage() {
+  const [file, setFile] = useState(null);
+  const [validationKey, setValidationKey] = useState("");
+  const [validatorEmail, setValidatorEmail] = useState("");
+  const [notes, setNotes] = useState("");
+  const [isValidating, setIsValidating] = useState(false);
+  const [error, setError] = useState(null);
+  const [validationResult, setValidationResult] = useState(null);
+
+  const computeHash = async (file) => {
+    const arrayBuffer = await file.arrayBuffer();
+    const hashBuffer = await crypto.subtle.digest('SHA-256', arrayBuffer);
+    const hashArray = Array.from(new Uint8Array(hashBuffer));
+    return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+  };
+
+  const handleValidate = async (e) => {
+    e.preventDefault();
+    if (!file || !validationKey || !validatorEmail) {
+      setError("Please provide an image, validation key, and your email");
+      return;
+    }
+
+    setIsValidating(true);
+    setError(null);
+    setValidationResult(null);
+
+    try {
+      const uploadedHash = await computeHash(file);
+      
+      const images = await MedicalImage.filter({ validation_key: validationKey.trim() });
+      
+      if (images.length === 0) {
+        const attempt = await ValidationAttempt.create({
+          image_id: "unknown",
+          result: "not_found",
+          validator_email: validatorEmail,
+          uploaded_hash: uploadedHash,
+          expected_hash: "N/A",
+          notes: notes || "Validation key not found in system"
+        });
+
+        setValidationResult({
+          result: "not_found",
+          message: "Validation key not found",
+          details: "The validation key you provided does not exist in our system."
+        });
+
+        await SendEmail({
+          to: validatorEmail,
+          subject: "Image Validation Failed - Key Not Found",
+          body: `
+Your validation attempt has been recorded.
+
+Result: Validation key not found
+Key provided: ${validationKey}
+Date: ${new Date().toLocaleString()}
+
+The validation key you entered does not exist in our system. Please verify:
+1. The key is entered correctly (case-sensitive)
+2. The key was provided to you when the image was uploaded
+3. Contact the uploader for the correct key
+
+MedGuard Authentication Team
+          `
+        });
+      } else {
+        const originalImage = images[0];
+        const isAuthentic = uploadedHash === originalImage.image_hash;
+        
+        const attempt = await ValidationAttempt.create({
+          image_id: originalImage.id,
+          result: isAuthentic ? "original" : "tampered",
+          validator_email: validatorEmail,
+          uploaded_hash: uploadedHash,
+          expected_hash: originalImage.image_hash,
+          notes: notes
+        });
+
+        setValidationResult({
+          result: isAuthentic ? "original" : "tampered",
+          image: originalImage,
+          uploadedHash,
+          expectedHash: originalImage.image_hash,
+          message: isAuthentic 
+            ? "✓ Image is authentic and unmodified" 
+            : "⚠ Warning: Image has been tampered with",
+          details: isAuthentic
+            ? "The cryptographic hash matches perfectly. This image is the original, unmodified version."
+            : "The cryptographic hash does not match. This image has been modified, edited, or is not the original file."
+        });
+
+        await SendEmail({
+          to: validatorEmail,
+          subject: `Image Validation ${isAuthentic ? 'Successful' : 'FAILED'} - MedGuard`,
+          body: `
+Validation Result: ${isAuthentic ? 'ORIGINAL ✓' : 'TAMPERED ⚠'}
+
+Image Details:
+- Patient: ${originalImage.patient_name || 'N/A'}
+- Image Type: ${originalImage.image_type}
+- Upload Date: ${new Date(originalImage.created_date).toLocaleString()}
+- Image ID: ${originalImage.id}
+
+Hash Comparison:
+- Expected: ${originalImage.image_hash}
+- Uploaded: ${uploadedHash}
+- Match: ${isAuthentic ? 'YES' : 'NO'}
+
+${isAuthentic 
+  ? 'This image is authentic and has not been tampered with.'
+  : 'WARNING: This image appears to have been modified. The cryptographic signature does not match the original. Please investigate immediately.'}
+
+Validation performed on: ${new Date().toLocaleString()}
+${notes ? `\nNotes: ${notes}` : ''}
+
+MedGuard Authentication Team
+          `
+        });
+
+        if (originalImage.patient_email) {
+          await SendEmail({
+            to: originalImage.patient_email,
+            subject: `Your Medical Image Was Validated - ${isAuthentic ? 'Authentic' : 'Tampered Detected'}`,
+            body: `
+Hello ${originalImage.patient_name || 'Patient'},
+
+Your medical image (ID: ${originalImage.id}) was just validated by ${validatorEmail}.
+
+Result: ${isAuthentic ? 'ORIGINAL - Image is authentic ✓' : 'TAMPERED - Modification detected ⚠'}
+Validation Date: ${new Date().toLocaleString()}
+
+${!isAuthentic 
+  ? 'IMPORTANT: Our system detected that the validated image does not match the original cryptographic signature. This may indicate tampering or use of a different file. Please contact support if you did not expect this result.'
+  : 'The image validation was successful. The file is authentic and unmodified.'}
+
+MedGuard Authentication Team
+            `
+          });
+        }
+      }
+    } catch (error) {
+      setError("Validation failed. Please try again.");
+      console.error("Validation error:", error);
+    }
+
+    setIsValidating(false);
+  };
+
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50 to-teal-50 py-8 px-4 md:px-8">
+      <div className="max-w-4xl mx-auto">
+        <div className="mb-8">
+          <h1 className="text-3xl md:text-4xl font-bold text-slate-900 mb-2">Validate Medical Image</h1>
+          <p className="text-slate-600">Verify the authenticity and integrity of a medical image</p>
+        </div>
+
+        {error && (
+          <Alert variant="destructive" className="mb-6">
+            <AlertCircle className="h-4 w-4" />
+            <AlertDescription>{error}</AlertDescription>
+          </Alert>
+        )}
+
+        {!validationResult ? (
+          <form onSubmit={handleValidate} className="space-y-6">
+            <Card className="border-none shadow-xl bg-white/80 backdrop-blur-sm">
+              <CardHeader className="border-b bg-gradient-to-r from-cyan-50 to-blue-50">
+                <CardTitle className="flex items-center gap-2">
+                  <Shield className="w-5 h-5 text-cyan-600" />
+                  Upload Image to Validate
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="p-6">
+                <FileDropZone onFileSelect={setFile} selectedFile={file} />
+              </CardContent>
+            </Card>
+
+            <Card className="border-none shadow-xl bg-white/80 backdrop-blur-sm">
+              <CardHeader className="border-b bg-gradient-to-r from-cyan-50 to-blue-50">
+                <CardTitle className="flex items-center gap-2">
+                  <Key className="w-5 h-5 text-cyan-600" />
+                  Validation Information
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="p-6 space-y-4">
+                <div>
+                  <Label htmlFor="validation_key">Validation Key *</Label>
+                  <Input
+                    id="validation_key"
+                    required
+                    value={validationKey}
+                    onChange={(e) => setValidationKey(e.target.value)}
+                    placeholder="VK-XXXXXXXX-XXXXXXXX"
+                    className="font-mono"
+                  />
+                  <p className="text-sm text-slate-500 mt-1">
+                    Enter the validation key provided when the image was uploaded
+                  </p>
+                </div>
+
+                <div>
+                  <Label htmlFor="validator_email">Your Email Address *</Label>
+                  <Input
+                    id="validator_email"
+                    type="email"
+                    required
+                    value={validatorEmail}
+                    onChange={(e) => setValidatorEmail(e.target.value)}
+                    placeholder="your@email.com"
+                  />
+                  <p className="text-sm text-slate-500 mt-1">
+                    Results will be sent to this email
+                  </p>
+                </div>
+
+                <div>
+                  <Label htmlFor="notes">Notes (Optional)</Label>
+                  <Textarea
+                    id="notes"
+                    value={notes}
+                    onChange={(e) => setNotes(e.target.value)}
+                    placeholder="Add any notes about this validation..."
+                    rows={2}
+                  />
+                </div>
+              </CardContent>
+            </Card>
+
+            <Button
+              type="submit"
+              disabled={isValidating || !file || !validationKey || !validatorEmail}
+              size="lg"
+              className="w-full bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-700 hover:to-blue-700 text-white"
+            >
+              {isValidating ? (
+                <>
+                  <Loader2 className="w-5 h-5 mr-2 animate-spin" />
+                  Validating Image...
+                </>
+              ) : (
+                <>
+                  <CheckCircle2 className="w-5 h-5 mr-2" />
+                  Validate Image
+                </>
+              )}
+            </Button>
+          </form>
+        ) : (
+          <ValidationResult
+            result={validationResult}
+            onValidateAnother={() => {
+              setValidationResult(null);
+              setFile(null);
+              setValidationKey("");
+              setNotes("");
+            }}
+          />
+        )}
+      </div>
+    </div>
+  );
+}

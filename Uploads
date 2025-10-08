@@ -1,0 +1,117 @@
+import React, { useState } from "react";
+import { MedicalImage } from "@/entities/all";
+import { UploadFile, SendEmail } from "@/integrations/Core";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Upload as UploadIcon, FileImage, CheckCircle2, AlertCircle, Loader2 } from "lucide-react";
+import { useNavigate } from "react-router-dom";
+import { createPageUrl } from "@/utils";
+
+import FileDropZone from "../components/upload/FileDropZone";
+import SuccessModal from "../components/upload/SuccessModal";
+
+export default function UploadPage() {
+  const navigate = useNavigate();
+  const [file, setFile] = useState(null);
+  const [formData, setFormData] = useState({
+    patient_name: "",
+    patient_email: "",
+    patient_id: "",
+    image_type: "",
+    notes: ""
+  });
+  const [isUploading, setIsUploading] = useState(false);
+  const [error, setError] = useState(null);
+  const [uploadedImage, setUploadedImage] = useState(null);
+
+  const handleFileSelect = (selectedFile) => {
+    setFile(selectedFile);
+    setError(null);
+  };
+
+  const computeHash = async (file) => {
+    const arrayBuffer = await file.arrayBuffer();
+    const hashBuffer = await crypto.subtle.digest('SHA-256', arrayBuffer);
+    const hashArray = Array.from(new Uint8Array(hashBuffer));
+    return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+  };
+
+  const generateValidationKey = () => {
+    return 'VK-' + Math.random().toString(36).substr(2, 9).toUpperCase() + '-' + Date.now().toString(36).toUpperCase();
+  };
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    if (!file || !formData.patient_email || !formData.image_type) {
+      setError("Please fill in all required fields and select an image");
+      return;
+    }
+
+    setIsUploading(true);
+    setError(null);
+
+    try {
+      const imageHash = await computeHash(file);
+      const { file_url } = await UploadFile({ file });
+      const validationKey = generateValidationKey();
+
+      const imageRecord = await MedicalImage.create({
+        image_url: file_url,
+        image_hash: imageHash,
+        validation_key: validationKey,
+        patient_name: formData.patient_name,
+        patient_email: formData.patient_email,
+        patient_id: formData.patient_id,
+        image_type: formData.image_type,
+        notes: formData.notes,
+        status: "uploaded"
+      });
+
+      await SendEmail({
+        to: formData.patient_email,
+        subject: "Medical Image Uploaded Successfully - MedGuard",
+        body: `
+Hello ${formData.patient_name || 'Patient'},
+
+Your medical image has been securely uploaded and protected with cryptographic authentication.
+
+Image Details:
+- Image ID: ${imageRecord.id}
+- Upload Date: ${new Date().toLocaleString()}
+- Image Type: ${formData.image_type}
+- Validation Key: ${validationKey}
+
+IMPORTANT: Save this validation key securely. You will need it to verify the authenticity of your image.
+
+To validate your image in the future:
+1. Go to ${window.location.origin}${createPageUrl('Validate')}
+2. Upload your image file
+3. Enter the validation key: ${validationKey}
+
+The system will verify if the image has been tampered with or modified.
+
+Best regards,
+MedGuard Authentication Team
+        `
+      });
+
+      setUploadedImage({ ...imageRecord, validation_key: validationKey });
+      setFile(null);
+      setFormData({
+        patient_name: "",
+        patient_email: "",
+        patient_id: "",
+        image_type: "",
+        notes: ""
+      });
+    } catch (error) {
+      setError("Failed to upload image. Please try again.");
+      console.error("Upload error:", error);
+    }
+
+ 
